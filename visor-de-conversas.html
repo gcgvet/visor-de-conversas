@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visor de Conversas</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#111922;color:#edf2f4;font:15px system-ui,sans-serif}main{height:100dvh;display:grid;grid-template-columns:248px 1fr;gap:20px;padding:10px}.sidebar{padding:24px 16px;background:#1a2531;border-radius:18px;overflow:auto}h1{font-size:21px;margin:0 0 24px}button,select{font:inherit;width:100%;padding:10px;border:1px solid #526673;border-radius:9px;color:inherit;background:#283946;margin-bottom:10px}button{cursor:pointer;text-align:left}button.primary{background:#a6e5cb;color:#172b2b;border-color:transparent;font-weight:650}button:disabled{opacity:.48;cursor:default}label{display:block;font-size:13px;margin:8px 0}#status{font-size:13px;line-height:1.5;overflow-wrap:anywhere;color:#c1d4de}.stage{min-width:0;min-height:0;display:grid;place-items:center}.phone{position:relative;width:min(100%,calc((100dvh - 20px)*390/844));aspect-ratio:390/844;overflow:hidden;border-radius:30px;box-shadow:0 0 0 2px #4c5d69,0 10px 40px #0008;background:#ecf2ef}.phone canvas{display:block;width:100%;height:100%}.scroll{position:absolute;top:12.32%;bottom:3.08%;left:0;right:0;overflow-y:scroll;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#73928b #dce8e3;outline-offset:-3px}.scroll:focus-visible{outline:2px solid #357368}@media(max-width:640px){main{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);gap:8px}.sidebar{padding:8px 12px;display:flex;flex-wrap:wrap;align-items:center;gap:7px}.sidebar h1{font-size:15px;margin:0;width:100%}button,select{width:auto;margin:0;padding:6px;font-size:12px}label{margin:0}#status{margin:0}.phone{width:auto;height:auto;max-height:100%;max-width:100%;justify-self:center;align-self:stretch;border-radius:20px}}
+</style>
+<style>
+[hidden]{display:none!important}
+.phone{isolation:isolate}
+.scroll{scrollbar-color:#73928b transparent}
+.spacer{position:relative}
+.attachment-hit{position:absolute;margin:0;padding:0;border:0;background:transparent;color:transparent}
+.attachment-hit:focus-visible{outline:2px solid #3786c0;outline-offset:-2px}
+.preview{position:absolute;inset:12.32% 0 3.08%;display:flex;flex-direction:column;gap:10px;padding:12px;background:#15242d;color:#f0f5f7;z-index:2}
+.preview header{display:flex;align-items:center;gap:10px;overflow-wrap:anywhere}
+.preview button{width:auto;margin:0}
+.preview-content{flex:1;min-height:0;display:grid;place-items:center;text-align:center}
+.preview-content img,.preview-content video{max-width:100%;max-height:100%;object-fit:contain}
+.preview-content audio{max-width:100%}
+.preview-content object{width:100%;height:100%;border:0}
+.preview a{color:#b8efdb}
+</style>
+<main>
+<aside class="sidebar">
+<h1>Visor de Conversas</h1>
+<input id="file" type="file" accept=".txt,.zip,text/plain,application/zip" hidden>
+<input id="folder" type="file" webkitdirectory multiple hidden>
+<button id="load" class="primary">Carregar conversa</button>
+<button id="loadFolder">Selecionar pasta de anexos</button>
+<button id="theme" aria-pressed="false">Modo escuro</button>
+<button id="print" disabled>Gerar print em PNG</button>
+<label for="chat" id="chatLabel" hidden>Qual conversa deseja abrir?</label>
+<select id="chat" hidden></select>
+<label for="sender" id="senderLabel" hidden>Mensagens à direita</label>
+<select id="sender" hidden></select>
+<p id="status" role="status">Selecione um TXT ou ZIP exportado pelo WhatsApp.</p>
+</aside>
+<section class="stage">
+<div class="phone">
+<canvas id="screen" width="780" height="1688" aria-label="Conversa no visor do celular"></canvas>
+<div class="scroll" tabindex="0" aria-label="Rolar conversa"><div id="spacer" class="spacer"></div></div>
+<section id="preview" class="preview" role="dialog" aria-label="Anexo da conversa" hidden>
+<header><button id="closePreview" aria-label="Voltar à conversa">‹ Voltar</button><strong id="previewName"></strong></header>
+<div id="previewContent" class="preview-content"></div>
+<a id="download" hidden>Baixar arquivo</a>
+</section>
+</div>
+</section>
+</main>
+<script>
+'use strict';
+const byId = id => document.getElementById(id);
+const file = byId('file'), load = byId('load'), print = byId('print');
+const sender = byId('sender'), senderLabel = byId('senderLabel'), status = byId('status');
+const screen = byId('screen'), scroll = document.querySelector('.scroll'), spacer = byId('spacer');
+const ctx = screen.getContext('2d');
+const W = 390, H = 844, TOP = 104, BOTTOM = 818;
+const phone = document.querySelector('.phone');
+const folder = byId('folder'), chat = byId('chat'), theme = byId('theme');
+let messages = [], cards = [], title = '', total = 0, archive = new Map(), generation = 0;
+let candidates = [], sourceName = '', chatPath = '', folderEntries = new Map(), dark = false;
+let previewUrl = '', previewToken = 0, previewTrigger;
+const segmenter = new Intl.Segmenter(undefined,{granularity:'grapheme'});
+const decoder = new TextDecoder();
+const basename = name => name.split(/[\\/]/).pop();
+const key = name => name.replace(/\\/g,'/').normalize('NFC');
+const parent = name => name.slice(0,name.lastIndexOf('/')+1);
+const mimeTypes = {
+  jpg:'image/jpeg', jpeg:'image/jpeg', png:'image/png', gif:'image/gif',
+  webp:'image/webp', bmp:'image/bmp', avif:'image/avif',
+  pdf:'application/pdf', mp4:'video/mp4', webm:'video/webm', mov:'video/quicktime',
+  mp3:'audio/mpeg', opus:'audio/ogg', ogg:'audio/ogg', wav:'audio/wav',
+  m4a:'audio/mp4', aac:'audio/aac'
+};
+const mimeFor = name => Object.hasOwn(mimeTypes,name.split('.').pop().toLowerCase())
+  ? mimeTypes[name.split('.').pop().toLowerCase()] : 'application/octet-stream';
+
+async function openZip(source) {
+  const size = source.size;
+  const tail = new DataView(await source.slice(Math.max(0,size-65557)).arrayBuffer());
+  let end = tail.byteLength - 22;
+  while (end >= 0 && (tail.getUint32(end,true) !== 0x06054b50 ||
+    end + 22 + tail.getUint16(end+20,true) !== tail.byteLength)) end--;
+  if (end < 0) throw Error('O arquivo não é um ZIP válido.');
+  const count = tail.getUint16(end+10,true), length = tail.getUint32(end+12,true);
+  const offset = tail.getUint32(end+16,true);
+  if (count === 65535 || length > 32*1024*1024 || offset+length > size ||
+    tail.getUint16(end+4,true) || tail.getUint16(end+6,true)) throw Error('Formato de ZIP não suportado.');
+  const dir = new DataView(await source.slice(offset,offset+length).arrayBuffer());
+  const entries = new Map();
+  let cursor = 0;
+  for (let i=0;i<count;i++) {
+    if (dir.getUint32(cursor,true) !== 0x02014b50) throw Error('Diretório do ZIP inválido.');
+    const nameSize = dir.getUint16(cursor+28,true);
+    const name = key(decoder.decode(new Uint8Array(dir.buffer,cursor+46,nameSize)));
+    const flags = dir.getUint16(cursor+8,true), method = dir.getUint16(cursor+10,true);
+    const compressed = dir.getUint32(cursor+20,true), plain = dir.getUint32(cursor+24,true);
+    const start = dir.getUint32(cursor+42,true);
+    if (name && !name.endsWith('/') && !name.startsWith('__MACOSX/') && !entries.has(name)) entries.set(name, async (limit) => {
+      if (flags & 1 || plain > limit || compressed > limit) throw Error('Entrada protegida ou muito grande.');
+      const header = new DataView(await source.slice(start,start+30).arrayBuffer());
+      if (header.getUint32(0,true) !== 0x04034b50) throw Error('Entrada ZIP inválida.');
+      const dataStart = start+30+header.getUint16(26,true)+header.getUint16(28,true);
+      if (dataStart+compressed > offset) throw Error('Entrada ZIP incompleta.');
+      const data = source.slice(dataStart,dataStart+compressed);
+      if (method === 0 && compressed === plain) return data;
+      if (method !== 8) throw Error('Compressão ZIP não suportada.');
+      const reader = data.stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+      const chunks = [];
+      let decoded = 0;
+      try {
+        while (true) {
+          const {value,done} = await reader.read();
+          if (done) break;
+          decoded += value.byteLength;
+          if (decoded > plain) throw Error('Tamanho ZIP inválido.');
+          chunks.push(value);
+        }
+      } finally { await reader.cancel(); }
+      if (decoded !== plain) throw Error('Entrada ZIP incompleta.');
+      return new Blob(chunks);
+    });
+    cursor += 46+nameSize+dir.getUint16(cursor+30,true)+dir.getUint16(cursor+32,true);
+  }
+  return entries;
+}
+
+function parseChat(text) {
+  const result = [];
+  const clean = text.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g,'');
+  const prefix = /^\[?(\d{1,4}[/.\-]\d{1,2}[/.\-]\d{2,4}),?\s+(\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s*[ap]\.?\s*m\.?)?)(?:\]\s*|\s+-\s+)(.*)$/i;
+  for (const line of clean.split(/\r?\n/)) {
+    const match = line.match(prefix);
+    if (!match) {
+      if (result.length) result.at(-1).body += '\n'+line;
+      continue;
+    }
+    const message = match[3].match(/^([^:]{1,150}): (.*)$/);
+    result.push({date:match[1], time:match[2].trim(), author:message?.[1] || '', body:message?.[2] ?? match[3]});
+  }
+  for (const item of result) item.body = item.body.trimEnd();
+  return result;
+}
+
+function font(size, weight=400) {
+  ctx.font = weight+' '+size+'px system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+}
+function wrap(value, width) {
+  const output = [];
+  for (const line of value.split('\n')) {
+    let current = '';
+    for (const word of line.split(/(\s+)/)) {
+      if (ctx.measureText(current+word).width <= width) { current += word; continue; }
+      if (current.trim()) output.push(current.trimEnd());
+      current = word.trimStart();
+      if (ctx.measureText(current).width <= width) continue;
+      let part = '';
+      for (const {segment:char} of segmenter.segment(current)) {
+        if (ctx.measureText(part+char).width > width && part) { output.push(part); part = ''; }
+        part += char;
+      }
+      current = part;
+    }
+    output.push(current.trimEnd());
+  }
+  return output;
+}
+function findAttachment(body, archiveNames, folderNames) {
+  const first = body.split('\n')[0].trim();
+  const name = key(first.match(/^<[^:>]+:\s*(.+)>$/)?.[1] ??
+    first.match(/^(.+?)\s+\([^)]*(?:attached|anexad)[^)]*\)$/i)?.[1] ?? first);
+  const nearby = parent(chatPath)+name;
+  if (archive.has(nearby)) return {name:basename(name),read:archive.get(nearby)};
+  if (archive.has(name) && name.includes('/')) return {name:basename(name),read:archive.get(name)};
+  const base = basename(name);
+  const matches = archiveNames.get(base) ?? [];
+  if (matches.length === 1) return {name:base,read:matches[0]};
+  const local = folderNames.get(base) ?? [];
+  if (local.length === 1) return {name:base,read:local[0]};
+  return null;
+}
+
+function indexNames(entries) {
+  const index = new Map();
+  for (const [path,read] of entries) {
+    const name = basename(path);
+    if (!index.has(name)) index.set(name,[]);
+    index.get(name).push(read);
+  }
+  return index;
+}
+
+function layout() {
+  let y = 13, date = '';
+  cards = [];
+  const archiveNames=indexNames(archive), folderNames=indexNames(folderEntries);
+  for (const item of messages) {
+    if (item.date !== date) {
+      date = item.date;
+      cards.push({date, y, height:26, type:'date'});
+      y += 36;
+    }
+    const mine = item.author && item.author === sender.value;
+    const system = !item.author;
+    const attachment = findAttachment(item.body,archiveNames,folderNames);
+    const picture = attachment && mimeFor(attachment.name).startsWith('image/');
+    const body = attachment ? item.body.split('\n').slice(1).join('\n') : item.body;
+    const name = !system && !mine ? item.author : '';
+    font(system ? 12 : 15);
+    const lines = body ? wrap(body,252) : [];
+    let width = system ? 90 : 72;
+    for (const line of lines) width = Math.max(width,ctx.measureText(line).width+22);
+    font(12,650);
+    width = Math.min(274,Math.max(width,ctx.measureText(name).width+22,attachment ? 260 : 0));
+    const mediaHeight = picture ? 156 : attachment ? 43 : 0;
+    const height = 17 + lines.length*(system?16:20)+(name?18:0)+mediaHeight+(system?0:14);
+    const x = system ? (W-width)/2 : mine ? W-width-19 : 13;
+    cards.push({item, x, y, height, width, lines, mine, system, name, picture, attachment, mediaHeight});
+    y += height + 5;
+  }
+  total = y+9;
+  resize();
+}
+function resize() {
+  const scale = screen.getBoundingClientRect().height/H;
+  spacer.style.height = (total * scale)+'px';
+  const hitTargets=document.createDocumentFragment();
+  for (const card of cards) {
+    if (!card.attachment) continue;
+    const button = document.createElement('button');
+    button.className='attachment-hit';
+    button.setAttribute('aria-label','Abrir '+card.attachment.name);
+    button.style.left=(card.x+10)/W*100+'%';
+    button.style.width=(card.width-20)/W*100+'%';
+    button.style.top=(card.y+6+(card.name?18:0))*scale+'px';
+    button.style.height=(card.mediaHeight-8)*scale+'px';
+    button.onclick=()=>showAttachment(card.attachment,button);
+    hitTargets.append(button);
+  }
+  spacer.replaceChildren(hitTargets);
+  draw();
+}
+function pill(x,y,w,h,r,color) {
+  ctx.fillStyle=color; ctx.beginPath(); ctx.roundRect(x,y,w,h,r); ctx.fill();
+}
+function label(value,x,y,color,size,weight=400,maxWidth) {
+  font(size,weight); ctx.fillStyle=color;
+  if (maxWidth) ctx.fillText(value,x,y,maxWidth); else ctx.fillText(value,x,y);
+}
+function center(value,y,color,size,weight=400) {
+  font(size,weight); label(value,(W-ctx.measureText(value).width)/2,y,color,size,weight);
+}
+const pictures = new Map();
+const palettes = {
+  light:{wall:'#eee5d9',pattern:'#e3d6c7',ink:'#172b36',muted:'#476375',head:'#253e50',date:'#e0e9ef',mine:'#c5e8dc',other:'#fff',media:'#dfeae9'},
+  dark:{wall:'#111c25',pattern:'#253541',ink:'#eef5f7',muted:'#afc2ca',head:'#202f3a',date:'#253746',mine:'#164a42',other:'#233540',media:'#324953'}
+};
+let wallpaper;
+const wallpaperSource = 'https://gist.githubusercontent.com/abdurrahmanekr/2747d704edec93a06e454eba2653e0/raw';
+fetch(wallpaperSource,{referrerPolicy:'no-referrer'}).then(async response=>{
+  if (!response.ok) return;
+  const blob=await response.blob();
+  const raw=blob.type.startsWith('image/') ? '' : (await blob.text()).trim();
+  const url=blob.type.startsWith('image/') ? URL.createObjectURL(blob)
+    : /^(?:<\?xml[^>]*>\s*)?<svg\b/i.test(raw) ? URL.createObjectURL(new Blob([raw],{type:'image/svg+xml'}))
+    : raw.match(/data:image\/[\w+.-]+(?:;[^,\s"')]+)?,[^"')\s]+/i)?.[0];
+  if (!url) return;
+  const image=new Image();
+  image.onload=()=>{wallpaper=image; draw();};
+  image.src=url;
+}).catch(()=>{});
+function imageFor({read}) {
+  if (!pictures.has(read)) {
+    const token = generation;
+    const state = {};
+    pictures.set(read,state);
+    read(24*1024*1024).then(blob=>createImageBitmap(blob)).then(bitmap=>{
+      if (token !== generation || pictures.get(read) !== state) { bitmap.close(); return; }
+      state.bitmap = bitmap; requestAnimationFrame(draw);
+    }).catch(()=>{state.failed=true; requestAnimationFrame(draw);});
+  }
+  return pictures.get(read);
+}
+function draw() {
+  const colors = dark ? palettes.dark : palettes.light;
+  const scale = screen.getBoundingClientRect().height/H || 1;
+  const offset = scroll.scrollTop/scale;
+  ctx.setTransform(2,0,0,2,0,0);
+  ctx.fillStyle=colors.wall; ctx.fillRect(0,0,W,H);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0,TOP,W,BOTTOM-TOP); ctx.clip();
+  if (wallpaper) {
+    ctx.globalAlpha=dark ? .18 : .65;
+    ctx.fillStyle=ctx.createPattern(wallpaper,'repeat');
+    ctx.fillRect(0,TOP,W,BOTTOM-TOP);
+    ctx.globalAlpha=1;
+  }
+  ctx.strokeStyle=colors.pattern; ctx.lineWidth=1;
+  if (!wallpaper) for (let y=TOP+15;y<BOTTOM;y+=34) for(let x=12+(y%3)*6;x<W;x+=40) {
+    ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+8,y-4); ctx.lineTo(x+16,y);
+    ctx.lineTo(x+8,y+4); ctx.closePath(); ctx.stroke();
+  }
+  if (!messages.length) {
+    center('Sua conversa aparece aqui',416,colors.ink,19,650);
+    center('Abra um TXT ou ZIP exportado pelo WhatsApp',444,colors.muted,13);
+  }
+  let low=0, high=cards.length;
+  while (low<high) {
+    const mid=(low+high)>>1;
+    if (cards[mid].y+cards[mid].height<offset) low=mid+1; else high=mid;
+  }
+  for (let i=low;i<cards.length;i++) {
+    const card=cards[i], y=TOP+card.y-offset;
+    if (y>=BOTTOM) break;
+    if (card.type==='date') {
+      pill(144,y,102,24,8,colors.date);
+      center(card.date,y+16,colors.ink,12,650);
+      continue;
+    }
+    const {x,width,height,mine,system,name,lines,picture,attachment,item}=card;
+    pill(x,y,width,height,11,system?colors.date:mine?colors.mine:colors.other);
+    let pos=y+17;
+    if (name) { label(name,x+11,pos,dark?'#90dfcb':'#24625b',12,650,width-22); pos+=18; }
+    if (picture) {
+      const state=imageFor(attachment), image=state.bitmap;
+      const frameY=pos-11;
+      pill(x+10,frameY,width-20,146,7,colors.media);
+      if (image) {
+        const ratio=Math.min((width-20)/image.width,146/image.height);
+        const iw=image.width*ratio, ih=image.height*ratio;
+        ctx.drawImage(image,x+(width-iw)/2,frameY+(146-ih)/2,iw,ih);
+      } else label(state.failed?'Imagem indisponível':'Carregando imagem…',x+18,frameY+75,'#365952',12);
+      pos+=156;
+    } else if (attachment) {
+      pill(x+10,pos-11,width-20,35,6,colors.media);
+      label(attachment.name,x+18,pos+3,colors.ink,12,650,width-36);
+      label('Abrir anexo',x+18,pos+17,colors.muted,10);
+      pos+=43;
+    }
+    for (const line of lines) {
+      label(line,x+11,pos,colors.ink,system?12:15);
+      pos+=system?16:20;
+    }
+    if (!system) {
+      font(10);
+      label(item.time,x+width-10-ctx.measureText(item.time).width,y+height-6,colors.muted,10);
+    }
+  }
+  ctx.restore();
+  ctx.fillStyle=colors.head; ctx.fillRect(0,0,W,TOP); ctx.fillRect(0,BOTTOM,W,H-BOTTOM);
+  pill(142,8,106,21,11,'#101e29');
+  const now=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  label(now,23,25,'#eef7f5',12,650);
+  pill(344,17,22,9,3,'#b7d6ce'); pill(367,20,2,3,1,'#b7d6ce');
+  pill(17,49,36,36,12,'#a6e5cb');
+  label((title.match(/[\p{L}\p{N}]/u)?.[0]||'V').toUpperCase(),29,72,'#223a48',15,750);
+  label(title||'Conversa',65,65,'#f1f7f6',19,700,306);
+  label(messages.length ? new Intl.NumberFormat('pt-BR').format(messages.length)+' registros' : 'Visualização local',66,85,'#b7d6ce',12);
+  pill(143,830,104,4,2,'#b7d6ce');
+}
+
+const preview=byId('preview'), previewContent=byId('previewContent');
+const closePreview=byId('closePreview'), download=byId('download');
+function hideAttachment(restoreFocus=false) {
+  previewToken++;
+  preview.hidden=true;
+  scroll.inert=false;
+  previewContent.replaceChildren();
+  download.hidden=true;
+  download.removeAttribute('href');
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl='';
+  if (restoreFocus) previewTrigger?.focus();
+  previewTrigger=null;
+}
+
+async function showAttachment(attachment,trigger) {
+  hideAttachment();
+  const token=previewToken;
+  previewTrigger=trigger;
+  preview.hidden=false;
+  scroll.inert=true;
+  closePreview.focus();
+  byId('previewName').textContent=attachment.name;
+  previewContent.textContent='Carregando anexo…';
+  try {
+    const blob=await attachment.read(256*1024*1024);
+    if (token!==previewToken) return;
+    const type=mimeFor(attachment.name);
+    previewUrl=URL.createObjectURL(blob.slice(0,blob.size,type));
+    download.href=previewUrl;
+    download.download=attachment.name;
+    download.hidden=false;
+    if (type==='application/pdf') {
+      const pdf=document.createElement('object');
+      pdf.type=type;
+      pdf.data=previewUrl;
+      pdf.setAttribute('aria-label',attachment.name);
+      pdf.textContent='A prévia depende do leitor de PDF do navegador. Use o botão para baixar.';
+      previewContent.replaceChildren(pdf);
+      return;
+    }
+    const kind=type.split('/')[0];
+    const tag={image:'img',video:'video',audio:'audio'}[kind];
+    if (!tag) {
+      previewContent.textContent='Use a opção abaixo para baixar e abrir este arquivo.';
+      return;
+    }
+    const media=document.createElement(tag);
+    if (kind==='image') media.alt=attachment.name;
+    else media.controls=true;
+    if (kind==='video') media.playsInline=true;
+    media.onerror=()=>{
+      if (token===previewToken) previewContent.textContent='Prévia indisponível. Baixe o arquivo para abrir.';
+    };
+    media.src=previewUrl;
+    previewContent.replaceChildren(media);
+  } catch (error) {
+    if (token===previewToken) previewContent.textContent=error.message;
+  }
+}
+closePreview.onclick=()=>hideAttachment(true);
+preview.addEventListener('keydown',event=>{
+  if (event.key==='Escape') hideAttachment(true);
+});
+function clearImages() {
+  generation++;
+  for (const image of pictures.values()) image.bitmap?.close();
+  pictures.clear();
+}
+function activate(candidate) {
+  hideAttachment();
+  clearImages();
+  chatPath=candidate?.path ?? '';
+  messages=candidate?.messages ?? [];
+  title=candidate ? (/^_chat\.txt$/i.test(basename(chatPath))
+    ? basename(parent(chatPath).slice(0,-1)) || sourceName : basename(chatPath))
+    .replace(/\.(zip|txt)$/i,'').replace(/^(?:conversa do whatsapp com|whatsapp chat with)\s+/i,'').trim() : '';
+  const participants=[...new Set(messages.map(item=>item.author).filter(Boolean))];
+  sender.replaceChildren(new Option('Nenhum', ''),...participants.map(name=>new Option(name,name)));
+  sender.hidden=senderLabel.hidden=!participants.length;
+  print.disabled=!messages.length;
+  layout();
+  scroll.scrollTop=0;
+  draw();
+  status.textContent=candidate ? 'Conversa carregada.' : 'Escolha uma conversa do ZIP para abrir.';
+}
+
+theme.onclick=()=>{
+  dark=!dark;
+  theme.setAttribute('aria-pressed',String(dark));
+  theme.textContent=dark?'Modo claro':'Modo escuro';
+  draw();
+};
+byId('loadFolder').onclick=()=>folder.click();
+folder.onchange=()=>{
+  if (!folder.files.length) return;
+  folderEntries=new Map(Array.from(folder.files,source=>[
+    key(source.webkitRelativePath || source.name),
+    async limit=>{
+      if (source.size>limit) throw Error('Arquivo grande demais para a prévia.');
+      return source;
+    }
+  ]));
+  folder.value='';
+  hideAttachment();
+  clearImages();
+  layout();
+  status.textContent=folderEntries.size+' arquivo(s) na pasta. '+(messages.length
+    ? 'Clique em um anexo para abrir.' : 'Os anexos serão vinculados ao abrir uma conversa.');
+};
+chat.onchange=()=>activate(chat.value==='' ? null : candidates[Number(chat.value)]);
+load.onclick=()=>file.click();
+file.onchange=async()=>{
+  const source=file.files[0];
+  file.value='';
+  if (!source) return;
+  load.disabled=true; print.disabled=true;
+  status.textContent='Lendo '+source.name+'…';
+  try {
+    const isText=/\.txt$/i.test(source.name);
+    const entries=isText ? new Map() : await openZip(source);
+    const names=isText ? [source.name] : [...entries.keys()].filter(name=>/\.txt$/i.test(name));
+    const found=[];
+    for (const path of names) {
+      try {
+        const limit=64*1024*1024;
+        if (isText && source.size>limit) throw Error('TXT grande demais para carregar.');
+        const blob=isText ? source : await entries.get(path)(limit);
+        const parsed=parseChat(await blob.text());
+        if (parsed.length) found.push({path,messages:parsed});
+      } catch (error) {
+        if (names.length===1) throw error;
+      }
+    }
+    if (!found.length) throw Error('Nenhuma conversa do WhatsApp reconhecida no arquivo.');
+    candidates=found;
+    archive=entries;
+    sourceName=source.name;
+    chat.replaceChildren(new Option('Selecione uma conversa…',''),
+      ...found.map(({path},index)=>new Option(path,String(index))));
+    chat.hidden=byId('chatLabel').hidden=found.length===1;
+    chat.value=found.length===1 ? '0' : '';
+    activate(found.length===1 ? found[0] : null);
+  } catch(error) {
+    status.textContent=error instanceof RangeError ? 'O ZIP está incompleto ou danificado.' : error.message;
+  } finally { load.disabled=false; print.disabled=!messages.length; }
+};
+sender.onchange=layout;
+scroll.addEventListener('scroll',()=>requestAnimationFrame(draw),{passive:true});
+new ResizeObserver(resize).observe(screen);
+print.onclick=()=>{
+  draw();
+  screen.toBlob(blob=>{
+    if (!blob) { status.textContent='Não foi possível gerar o PNG.'; return; }
+    const url=URL.createObjectURL(blob), link=document.createElement('a');
+    link.href=url;
+    link.download=(title.replace(/[<>:"/\\|?*\u0000-\u001f]/g,'_').slice(0,100)||'conversa')+'-print.png';
+    link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),30000);
+  },'image/png');
+};
+draw();
+</script>
+</html>
