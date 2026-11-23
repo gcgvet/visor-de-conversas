@@ -29,6 +29,9 @@
 <input id="folder" type="file" webkitdirectory multiple hidden>
 <button id="load" class="primary">Carregar conversa</button>
 <button id="loadFolder">Selecionar pasta de anexos</button>
+<input id="backgroundFile" type="file" accept="image/*" hidden>
+<button id="chooseBackground">Escolher plano de fundo</button>
+<button id="resetBackground" hidden>Restaurar fundo padrão</button>
 <button id="theme" aria-pressed="false">Modo escuro</button>
 <button id="print" disabled>Gerar print em PNG</button>
 <label for="chat" id="chatLabel" hidden>Qual conversa deseja abrir?</label>
@@ -257,7 +260,39 @@ const palettes = {
   light:{wall:'#eee5d9',pattern:'#e3d6c7',ink:'#172b36',muted:'#476375',head:'#253e50',date:'#e0e9ef',mine:'#c5e8dc',other:'#fff',media:'#dfeae9'},
   dark:{wall:'#111c25',pattern:'#253541',ink:'#eef5f7',muted:'#afc2ca',head:'#202f3a',date:'#253746',mine:'#164a42',other:'#233540',media:'#324953'}
 };
-let wallpaper;
+let wallpaper, localWallpaper;
+let wallpaperSelection=0;
+const backgroundFile=byId('backgroundFile'), resetBackground=byId('resetBackground');
+byId('chooseBackground').onclick=()=>backgroundFile.click();
+backgroundFile.onchange=async()=>{
+  const source=backgroundFile.files[0];
+  backgroundFile.value='';
+  if (!source) return;
+  const selection=++wallpaperSelection;
+  let objectUrl;
+  try {
+    objectUrl=URL.createObjectURL(source);
+    const image=new Image();
+    image.src=objectUrl;
+    await image.decode();
+    if (selection!==wallpaperSelection) return;
+    localWallpaper=image;
+    resetBackground.hidden=false;
+    draw();
+    status.textContent='Plano de fundo atualizado.';
+  } catch {
+    if (selection===wallpaperSelection) status.textContent='Não foi possível abrir essa imagem.';
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+};
+resetBackground.onclick=()=>{
+  wallpaperSelection++;
+  localWallpaper=null;
+  resetBackground.hidden=true;
+  draw();
+  status.textContent='Plano de fundo padrão restaurado.';
+};
 const wallpaperSource = 'https://gist.githubusercontent.com/abdurrahmanekr/2747d704edec93a06e454eba2653e0/raw';
 fetch(wallpaperSource,{referrerPolicy:'no-referrer'}).then(async response=>{
   if (!response.ok) return;
@@ -291,14 +326,21 @@ function draw() {
   ctx.fillStyle=colors.wall; ctx.fillRect(0,0,W,H);
   ctx.save();
   ctx.beginPath(); ctx.rect(0,TOP,W,BOTTOM-TOP); ctx.clip();
-  if (wallpaper) {
+  if (localWallpaper) {
+    const areaHeight=BOTTOM-TOP;
+    const fit=Math.max(W/localWallpaper.naturalWidth,areaHeight/localWallpaper.naturalHeight);
+    const width=localWallpaper.naturalWidth*fit, height=localWallpaper.naturalHeight*fit;
+    ctx.globalAlpha=dark ? .32 : .58;
+    ctx.drawImage(localWallpaper,(W-width)/2,TOP+(areaHeight-height)/2,width,height);
+    ctx.globalAlpha=1;
+  } else if (wallpaper) {
     ctx.globalAlpha=dark ? .18 : .65;
     ctx.fillStyle=ctx.createPattern(wallpaper,'repeat');
     ctx.fillRect(0,TOP,W,BOTTOM-TOP);
     ctx.globalAlpha=1;
   }
   ctx.strokeStyle=colors.pattern; ctx.lineWidth=1;
-  if (!wallpaper) for (let y=TOP+15;y<BOTTOM;y+=34) for(let x=12+(y%3)*6;x<W;x+=40) {
+  if (!wallpaper && !localWallpaper) for (let y=TOP+15;y<BOTTOM;y+=34) for(let x=12+(y%3)*6;x<W;x+=40) {
     ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+8,y-4); ctx.lineTo(x+16,y);
     ctx.lineTo(x+8,y+4); ctx.closePath(); ctx.stroke();
   }
